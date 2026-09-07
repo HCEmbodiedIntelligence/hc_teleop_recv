@@ -1,0 +1,41 @@
+# Example only: match these names to the robot model's channels.yaml before use.
+schema_version: 1
+adapter:
+  robot_id: ""
+  buttons_topic: /hc_teleop_recv/buttons
+input:
+  mode: udp                 # udp: receive PICO directly; vrdata: subscribe to existing HC JSON
+  bind_host: 0.0.0.0
+  source_ip: ''             # Optional PICO IPv4 address; otherwise lock the first active sender
+  pose_port: 5005
+  discovery_port: 5006
+  vr_data_topic: /vrdata
+  publish_vrdata: true      # Raw data publication in UDP mode only
+control:
+  rate_hz: 100
+  enabled_on_start: false
+  resume_on_a: true
+  input_timeout: 0.25
+  fk_timeout: 0.25
+  emergency_stop_topic: /teleop/emergency_stop
+channels:
+  - id: arm
+    controller: right
+    clutch_controller: right
+    clutch_threshold: 0.55
+    target_pose_topic: /teleop/arm/servo_p
+    fk_pose_topic: /teleop/arm/fk_pose
+    base_frame: base_link
+    tool_frame: tool0
+    # VR tracking-frame increments expressed in this channel's base_frame.
+    axis_mapping: [[0, 0, -1], [-1, 0, 0], [0, 1, 0]]
+    position_scale: 0.8
+    max_displacement: 0.8
+    orientation_enabled: true
+    filter_alpha: 0.75
+    position_deadband: 0.0
+    orientation_deadband: 0.0
+    # Optional Cartesian box in base_frame, metres (choose for the actual robot).
+    # workspace:
+    #   min: [-0.5, -0.5, 0.0]
+    #   max: [0.8, 0.5, 1.2]
