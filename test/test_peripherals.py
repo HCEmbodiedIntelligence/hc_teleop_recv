@@ -85,5 +85,8 @@ def test_conflicting_outputs_and_wrong_gripper_action_units_rejected():
         parse_config({'schema_version':1,'channels':[],'chassis':{'command_topic':'/hc_teleop/joint_cmd'}})
     with pytest.raises(ConfigError):
         parse_config({'schema_version':1,'channels':[],'grippers':[{'id':'a','command_type':'gripper_action','position_unit':'rad'}]})
-    with pytest.raises(ConfigError):
-        parse_config({'schema_version':1,'channels':[],'grippers':[{'id':'a'},{'id':'b'}]})
+    shared = parse_config({'schema_version':1,'channels':[],'grippers':[{'id':'a'},{'id':'b'}]})
+    assert shared.grippers[0].command_topic == shared.grippers[1].command_topic
+    with pytest.raises(ConfigError, match='joint_state'):
+        parse_config({'schema_version':1,'channels':[],'grippers':[
+            {'id':'a'}, {'id':'b','command_type':'float64'}]})

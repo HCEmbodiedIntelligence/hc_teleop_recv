@@ -83,7 +83,7 @@ def parse_grippers(document):
     import re
     if not isinstance(document, list) or len(document) > 16:
         raise ConfigError('grippers must be a list with at most 16 entries')
-    result, ids, outputs = [], set(), set()
+    result, ids, outputs = [], set(), {}
     for item in document:
         defaults = GripperConfig(id='gripper').__dict__
         item = mapping(item, {'id'}, set(defaults)-{'id'}, 'gripper')
@@ -95,14 +95,19 @@ def parse_grippers(document):
         values['enabled'] = boolean(values['enabled'], 'gripper.enabled')
         for key in ('command_topic', 'feedback_topic'):
             values[key] = topic(values[key], f'gripper.{key}')
-        if values['command_topic'] == values['feedback_topic'] or values['command_topic'] in outputs:
-            raise ConfigError('gripper command endpoints must be unique and separate from feedback')
-        outputs.add(values['command_topic'])
+        if values['command_topic'] == values['feedback_topic']:
+            raise ConfigError('gripper command endpoints must be separate from feedback')
         values['joint_name'] = text(values['joint_name'], 'gripper.joint_name')
         for key, options in [('controller',('left','right')), ('input_axis',('trigger','grip')),
                              ('enable_button',BUTTONS), ('command_type',('joint_state','float64','gripper_action')),
                              ('feedback_type',('joint_state','float64')), ('position_unit',('m','rad'))]:
             choice(values[key], options, f'gripper.{key}')
+        previous_command_type = outputs.get(values['command_topic'])
+        if previous_command_type is not None and (
+                previous_command_type != 'joint_state' or values['command_type'] != 'joint_state'):
+            raise ConfigError(
+                'shared gripper command topics are only supported with joint_state messages')
+        outputs[values['command_topic']] = values['command_type']
         for key, low, high in [('open_position',-10,10), ('closed_position',-10,10), ('max_speed',.0001,10),
                                ('max_effort',0,1000), ('deadband',0,.95), ('rate_hz',1,100), ('feedback_timeout',.02,5)]:
             values[key] = number(values[key], f'gripper.{key}', low, high)
