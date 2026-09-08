@@ -26,7 +26,7 @@ ros2 launch hc_teleop_recv hc_teleop_recv.launch.py \
 ```
 
 OpenArmX 示例位于模型资源：
-`openarmx_description/deployment/openarmx_v10_bimanual/model/hc_teleop.yaml`。
+`openarmx_driver/deployment/openarmx_v10_bimanual/model/hc_teleop.yaml`。
 通用单臂示例是 `config/single_arm.example.yaml`。机器人型号、关节、基座和工具名称均不写在前端代码中。
 
 ## 通过 humanoid_manager 切换机器人
@@ -47,7 +47,7 @@ resources:
 更新 OpenArmX 模型 ZIP（原 driver/composition 已部署时只需更新 model）：
 
 ```bash
-python3 src/openarmx_description/tools/create_deployment_bundle.py /tmp/openarmx-hc-model.zip
+python3 src/openarmx_driver/tools/create_model_bundle.py /tmp/openarmx-hc-model.zip
 ros2 run humanoid_manager humanoid_pluginctl.py validate /tmp/openarmx-hc-model.zip
 ros2 run humanoid_manager humanoid_pluginctl.py deploy /tmp/openarmx-hc-model.zip
 ros2 run humanoid_manager humanoid_pluginctl.py resolve openarmx_v10_bimanual
