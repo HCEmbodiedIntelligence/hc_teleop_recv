@@ -263,3 +263,104 @@ def test_optional_peripheral_ros_interfaces_only_use_mock_peers(base_type,grippe
         peer.destroy_node()
         executor.shutdown()
         context.shutdown()
+
+
+def test_vr_safety_resume_and_stop_events():
+    import json
+    from std_msgs.msg import Bool
+    from hc_teleop_recv.protocol import ControllerInput
+
+    context = Context()
+    context.init(args=[], domain_id=150 + os.getpid() % 10)
+    executor = SingleThreadedExecutor(context=context)
+
+    pose_port, discovery_port, event_port = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(3)]
+    for s in (pose_port, discovery_port, event_port):
+        s.bind(("127.0.0.1", 0))
+    p_port, d_port, e_port = [s.getsockname()[1] for s in (pose_port, discovery_port, event_port)]
+    for s in (pose_port, discovery_port):
+        s.close()
+    event_sock = event_port
+    event_sock.setblocking(False)
+
+    doc = document()
+    doc["input"] = {
+        "mode": "udp",
+        "bind_host": "127.0.0.1",
+        "pose_port": p_port,
+        "discovery_port": d_port,
+        "event_port": e_port,
+        "publish_vrdata": False,
+    }
+    doc["control"].update(enabled_on_start=False, resume_on_a=True)
+    recv = TeleopRecvNode(config=parse_config(doc), context=context)
+    peer = Node("vr_test_peer", context=context)
+    executor.add_node(recv)
+    executor.add_node(peer)
+
+    stop_msgs = []
+    peer.create_subscription(Bool, "/teleop/emergency_stop", stop_msgs.append, 10)
+    stop_pub = peer.create_publisher(Bool, "/teleop/emergency_stop", 10)
+
+    sender_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender_sock.settimeout(0.2)
+
+    seq = 0
+    def send_pose(held_mask=0, pressed_mask=0):
+        nonlocal seq
+        seq += 1
+        p = replace(packet(seq), right_input=ControllerInput(held_mask=held_mask, pressed_mask=pressed_mask))
+        sender_sock.sendto(wire(p), ("127.0.0.1", p_port))
+
+    def collect_vr_events(timeout=0.1):
+        events = []
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            for _ in range(5):
+                executor.spin_once(timeout_sec=0.002)
+            try:
+                data, _ = event_sock.recvfrom(2048)
+                events.append(json.loads(data.decode("utf-8")))
+            except BlockingIOError:
+                pass
+            time.sleep(0.005)
+        return events
+
+    try:
+        # 1. Send normal packet without A button
+        send_pose(held_mask=0)
+        events = collect_vr_events(0.05)
+        assert len(events) == 0
+        assert not recv.frontend.enabled
+
+        # 2. Press A button (bit 0 = 1) -> triggers safety_resume
+        send_pose(held_mask=1, pressed_mask=1)
+        events = collect_vr_events(0.08)
+        assert any(e.get("kind") == "safety_resume" for e in events)
+        assert recv.frontend.enabled
+        assert any(m.data is False for m in stop_msgs)
+
+        # 3. Assert emergency stop via ROS topic -> triggers safety_stop
+        stop_msgs.clear()
+        stop_pub.publish(Bool(data=True))
+        events = collect_vr_events(0.08)
+        assert any(e.get("kind") == "safety_stop" for e in events)
+        assert not recv.frontend.enabled
+
+        # 4. Release A then press A again -> triggers safety_resume
+        send_pose(held_mask=0)
+        collect_vr_events(0.03)
+        send_pose(held_mask=1, pressed_mask=1)
+        events = collect_vr_events(0.08)
+        assert any(e.get("kind") == "safety_resume" for e in events)
+        assert recv.frontend.enabled
+    finally:
+        event_sock.close()
+        sender_sock.close()
+        executor.remove_node(recv)
+        executor.remove_node(peer)
+        recv.destroy_node()
+        peer.destroy_node()
+        executor.shutdown()
+        context.shutdown()
+

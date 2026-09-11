@@ -1,8 +1,10 @@
 """HC PICO wire protocol extracted from middleware/core/protocol.py."""
 from __future__ import annotations
 
+import json
 import math
 import struct
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -252,3 +254,19 @@ def is_sequence_newer(sequence: int, previous: int | None) -> bool:
         return True
     difference = (sequence - previous) & 0xFFFFFFFF
     return 0 < difference < 0x80000000
+
+
+def envelope(kind: str, source: str, payload: Any, **metadata: Any) -> dict[str, Any]:
+    result = {
+        "version": 1,
+        "kind": kind,
+        "source": source,
+        "timestamp": time.time(),
+        "payload": payload,
+    }
+    result.update(metadata)
+    return result
+
+
+def encode_json_packet(value: dict[str, Any]) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

@@ -102,6 +102,7 @@ class ReceiverConfig:
     buttons_topic: str = "/hc_teleop_recv/buttons"
     chassis: ChassisConfig | None = None
     grippers: tuple[GripperConfig, ...] = ()
+    event_port: int = 5007
 
 
 def parse_config(document: Any) -> ReceiverConfig:
@@ -117,7 +118,8 @@ def parse_config(document: Any) -> ReceiverConfig:
     if type(root["schema_version"]) is not int or root["schema_version"] != 1:
         raise ConfigError("schema_version must be 1")
     inp = mapping(root.get("input", {}), set(), {
-        "mode", "bind_host", "source_ip", "pose_port", "discovery_port", "vr_data_topic", "publish_vrdata"
+        "mode", "bind_host", "source_ip", "pose_port", "discovery_port",
+        "event_port", "outbound_port", "vr_data_topic", "publish_vrdata"
     }, "input")
     mode = inp.get("mode", "udp")
     if mode not in ("udp", "vrdata"):
@@ -140,6 +142,9 @@ def parse_config(document: Any) -> ReceiverConfig:
         ports.append(port)
     if ports[0] == ports[1]:
         raise ConfigError("pose_port and discovery_port must differ")
+    event_port = inp.get("event_port", inp.get("outbound_port", 5007))
+    if type(event_port) is not int or not 1 <= event_port <= 65535:
+        raise ConfigError("input.event_port must be an integer port in [1, 65535]")
     ctrl = mapping(root.get("control", {}), set(), {
         "rate_hz", "input_timeout", "fk_timeout", "enabled_on_start", "resume_on_a", "emergency_stop_topic"
     }, "control")
@@ -215,6 +220,7 @@ def parse_config(document: Any) -> ReceiverConfig:
         emergency_stop_topic=stop_topic, channels=tuple(channels),
         robot_id=robot_id, buttons_topic=buttons_topic,
         chassis=chassis, grippers=grippers,
+        event_port=event_port,
     )
 
 

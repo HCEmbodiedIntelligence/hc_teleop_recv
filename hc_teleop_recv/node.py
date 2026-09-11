@@ -19,7 +19,10 @@ from std_srvs.srv import SetBool, Trigger
 from .config import load_config
 from .frontend import Frontend, InputSession
 from .peripheral_ros import PeripheralROS
-from .protocol import DISCOVERY_REQUEST, PacketError, Pose, decode_pose_packet, decode_vrdata
+from .protocol import (
+    DISCOVERY_REQUEST, PacketError, Pose, decode_pose_packet, decode_vrdata,
+    envelope, encode_json_packet,
+)
 
 
 class TeleopRecvNode(Node):
@@ -57,12 +60,19 @@ class TeleopRecvNode(Node):
         self.buttons_publisher = self.create_publisher(String, self.config.buttons_topic, 100)
         self.configuration_service = self.create_service(Trigger, "~/get_configuration", self._get_configuration)
         self.enable_service = self.create_service(SetBool, "~/set_enabled", self._set_enabled)
+        self.stop_publisher = self.create_publisher(
+            Bool, self.config.emergency_stop_topic, 10)
         self.stop_subscription = self.create_subscription(
             Bool, self.config.emergency_stop_topic, self._stop_callback, 10)
+        self.last_a_held = False
+        self.last_peer_host = self.config.source_ip if self.config.source_ip else None
+        self.outbound_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.outbound_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         if self.config.input_mode == "udp":
             try:
                 for port in (self.config.pose_port, self.config.discovery_port):
                     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     self.sockets.append(sock)
                     sock.bind((self.config.bind_host, port))
                     sock.setblocking(False)
@@ -85,19 +95,58 @@ class TeleopRecvNode(Node):
         response.message = json.dumps({"identity": self.configuration_identity, "configuration": self.configuration_document})
         return response
 
+    def _send_vr_event(self, kind: str, reason: str, **payload_kwargs):
+        host = self.last_peer_host or self.config.source_ip
+        if not host:
+            return
+        payload = {"reason": reason, "message": reason}
+        payload.update(payload_kwargs)
+        packet = envelope(kind, "hc_teleop_recv", payload)
+        raw = encode_json_packet(packet)
+        try:
+            for _ in range(2):
+                self.outbound_socket.sendto(raw, (host, self.config.event_port))
+        except OSError as exc:
+            self.get_logger().warn(f"Failed sending {kind} to VR ({host}:{self.config.event_port}): {exc}")
+
+    def _handle_safety_resume(self, reason: str) -> None:
+        if not self.frontend.enabled:
+            self.frontend.set_enabled(True)
+            self.peripherals.reset()
+            self.peripherals.tick(self.frontend, time.monotonic())
+        if self.stop_publisher is not None:
+            self.stop_publisher.publish(Bool(data=False))
+        self._send_vr_event("safety_resume", reason)
+        self.get_logger().info(f"Safety resume: {reason}")
+
+    def _handle_safety_stop(self, reason: str) -> None:
+        if self.frontend.enabled:
+            self.frontend.set_enabled(False)
+            self.peripherals.reset()
+            self.peripherals.tick(self.frontend, time.monotonic())
+        self._send_vr_event("safety_stop", reason)
+        self.get_logger().warn(f"Safety stop: {reason}")
+
     def _set_enabled(self, request, response):
-        self.frontend.set_enabled(request.data)
-        self.peripherals.reset()
-        self.peripherals.tick(self.frontend, time.monotonic())
-        response.success = True
-        response.message = "Enabled; release then press Grip to bind measured FK" if request.data else "Disabled"
+        if request.data:
+            self._handle_safety_resume("Service set_enabled True")
+            response.success = True
+            response.message = "Enabled; release then press Grip to bind measured FK"
+        else:
+            self._handle_safety_stop("Service set_enabled False")
+            response.success = True
+            response.message = "Disabled"
         return response
 
     def _stop_callback(self, message):
         if message.data:
-            self.frontend.set_enabled(False)
-            self.peripherals.reset()
-            self.peripherals.tick(self.frontend, time.monotonic())
+            self._handle_safety_stop("Emergency stop topic asserted")
+        else:
+            if not self.frontend.enabled:
+                self.frontend.set_enabled(True)
+                self.peripherals.reset()
+                self.peripherals.tick(self.frontend, time.monotonic())
+            self._send_vr_event("safety_resume", "Emergency stop topic cleared")
 
     def _fk_callback(self, channel, message):
         if message.header.frame_id != channel.base_frame:
@@ -115,6 +164,8 @@ class TeleopRecvNode(Node):
         self.fk_stamps[channel.id] = stamp
 
     def _accept(self, packet, peer):
+        if isinstance(peer, (tuple, list)) and peer and peer[0]:
+            self.last_peer_host = peer[0]
         now = time.monotonic()
         if not self.session.accept(packet, peer, now):
             self.rejected_packets += 1
@@ -126,6 +177,16 @@ class TeleopRecvNode(Node):
         self.frontend.ingest(packet, now)
         self.received_packets += 1
         inputs = {"left": packet.left_input, "right": packet.right_input}
+
+        right_input = packet.right_input
+        right_held = int(getattr(right_input, "held_mask", 0))
+        right_pressed = int(getattr(right_input, "pressed_mask", 0))
+        a_held = bool(right_held & 1)
+        a_down = bool(right_pressed & 1) or (a_held and not self.last_a_held)
+        self.last_a_held = a_held
+        if self.config.resume_on_a and a_down:
+            self._handle_safety_resume("VR controller A button pressed")
+
         edges = []
         if self.button_masks is not None:
             for hand, value in inputs.items():
@@ -165,6 +226,8 @@ class TeleopRecvNode(Node):
                     continue
                 if index == 1:
                     if data == DISCOVERY_REQUEST:
+                        if isinstance(peer, (tuple, list)) and peer and peer[0]:
+                            self.last_peer_host = peer[0]
                         try:
                             sock.sendto(f"PICO_RECEIVER_V1|{self.config.pose_port}".encode("ascii"), peer)
                         except OSError:
@@ -203,6 +266,11 @@ class TeleopRecvNode(Node):
             self.peripherals.close()
         for sock in self.sockets:
             sock.close()
+        if hasattr(self, 'outbound_socket') and self.outbound_socket is not None:
+            try:
+                self.outbound_socket.close()
+            except OSError:
+                pass
         return super().destroy_node()
 
 
