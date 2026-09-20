@@ -28,7 +28,6 @@ class GripperState:
     feedback: float | None = None
     feedback_at: float = float('-inf')
     target: float | None = None
-    armed: bool = False
     state: str = 'disabled'
     reason: str = 'disabled'
     last_publish: float = float('-inf')
@@ -49,7 +48,6 @@ class Peripherals:
     def reset(self):
         self.base_armed = False
         for state in self.grippers.values():
-            state.armed = False
             state.last_input = None
 
     def feedback(self, ident, position, now):
@@ -61,7 +59,7 @@ class Peripherals:
         self.grippers[ident].feedback_at = now
         return True
 
-    def tick(self, frontend, now, ready=None):
+    def tick(self, frontend, now, ready=None, input_ready=True):
         ready = ready or {}
         dt = min(.1, max(0, now-self.last_tick)) if self.last_tick is not None else 0.
         self.last_tick = now
@@ -69,7 +67,7 @@ class Peripherals:
             self.reset()
         self.was_enabled = frontend.enabled
         packet = frontend.packet
-        fresh = packet is not None and packet.protocol_version == 2 and now-frontend.input_at <= self.config.input_timeout
+        fresh = input_ready and packet is not None and packet.protocol_version == 2 and now-frontend.input_at <= self.config.input_timeout
         output = {'chassis':None, 'grippers':{}, 'stop_grippers':[]}
         cfg = self.config.chassis
         if cfg and cfg.enabled:
@@ -119,15 +117,10 @@ class Peripherals:
             elif state.feedback is None or now-state.feedback_at > cfg.feedback_timeout:
                 reason = '等待新鲜且位于开合范围内的夹爪反馈'
             if reason:
-                state.armed = False
                 state.state = 'disabled' if not cfg.enabled else 'waiting'
-            elif not held(packet,cfg.controller,cfg.enable_button):
-                state.armed = True
+            elif cfg.require_enable_button and not held(packet,cfg.controller,cfg.enable_button):
                 state.state = 'ready'
                 reason = '使能按键已松开'
-            elif not state.armed:
-                state.state = 'wait_release'
-                reason = '请先松开使能按键，再按下'
             else:
                 state.state = 'active'
             state.reason = reason or '夹爪控制中'

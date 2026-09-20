@@ -43,6 +43,7 @@ class GripperConfig:
     enabled: bool = False
     controller: str = 'right'
     input_axis: str = 'trigger'
+    require_enable_button: bool = True
     enable_button: str = 'grip_button'
     command_type: str = 'joint_state'
     command_topic: str = '/gripper/command'
@@ -93,6 +94,7 @@ def parse_grippers(document):
             raise ConfigError('gripper.id must be unique and use letters, digits or underscores')
         ids.add(ident)
         values['enabled'] = boolean(values['enabled'], 'gripper.enabled')
+        values['require_enable_button'] = boolean(values['require_enable_button'], 'gripper.require_enable_button')
         for key in ('command_topic', 'feedback_topic'):
             values[key] = topic(values[key], f'gripper.{key}')
         if values['command_topic'] == values['feedback_topic']:

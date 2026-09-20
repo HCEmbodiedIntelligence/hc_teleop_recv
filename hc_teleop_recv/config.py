@@ -80,6 +80,7 @@ class ChannelConfig:
     orientation_deadband: float
     workspace_min: tuple | None
     workspace_max: tuple | None
+    position_axis_signs: tuple = (1., 1., 1.)
 
 
 @dataclass(frozen=True)
@@ -103,10 +104,14 @@ class ReceiverConfig:
     chassis: ChassisConfig | None = None
     grippers: tuple[GripperConfig, ...] = ()
     event_port: int = 5007
+    arm_control_enabled: bool = True
+    actions: object = None
 
 
 def parse_config(document: Any) -> ReceiverConfig:
-    root = mapping(document, {"schema_version", "channels"}, {"input", "control", "adapter", "chassis", "grippers"}, "config")
+    root = mapping(document, {"schema_version", "channels"}, {"input", "control", "adapter", "chassis", "grippers", "actions"}, "config")
+    from .actions import parse_actions
+    actions = parse_actions(root.get("actions", {}))
     from .peripheral_config import parse_chassis, parse_grippers, validate_peripheral_endpoints
     chassis = parse_chassis(root['chassis']) if 'chassis' in root else None
     grippers = parse_grippers(root.get('grippers', []))
@@ -146,7 +151,8 @@ def parse_config(document: Any) -> ReceiverConfig:
     if type(event_port) is not int or not 1 <= event_port <= 65535:
         raise ConfigError("input.event_port must be an integer port in [1, 65535]")
     ctrl = mapping(root.get("control", {}), set(), {
-        "rate_hz", "input_timeout", "fk_timeout", "enabled_on_start", "resume_on_a", "emergency_stop_topic"
+        "rate_hz", "input_timeout", "fk_timeout", "enabled_on_start", "resume_on_a", "emergency_stop_topic",
+        "arm_control_enabled",
     }, "control")
     entries = root["channels"]
     if not isinstance(entries, list) or len(entries) > 32 or (not entries and chassis is None and not grippers):
@@ -155,7 +161,8 @@ def parse_config(document: Any) -> ReceiverConfig:
     ids, outputs, feedback = set(), set(), set()
     required = {"id", "controller", "target_pose_topic", "fk_pose_topic", "base_frame", "tool_frame", "axis_mapping"}
     optional = {"clutch_controller", "clutch_threshold", "position_scale", "max_displacement",
-                "orientation_enabled", "filter_alpha", "position_deadband", "orientation_deadband", "workspace"}
+                "orientation_enabled", "filter_alpha", "position_deadband", "orientation_deadband", "workspace",
+                "position_axis_signs"}
     for entry in entries:
         entry = mapping(entry, required, optional, "channel")
         ident = text(entry["id"], "channel.id")
@@ -179,6 +186,9 @@ def parse_config(document: Any) -> ReceiverConfig:
         matrix = np.asarray(axes)
         if not np.allclose(matrix @ matrix.T, np.eye(3), atol=1e-6, rtol=0) or not np.isclose(np.linalg.det(matrix), 1, atol=1e-6, rtol=0):
             raise ConfigError("axis_mapping must be an orthogonal rotation with determinant +1")
+        signs = vector(entry.get("position_axis_signs", [1, 1, 1]), 3, "position_axis_signs")
+        if any(value not in (-1, 1) for value in signs):
+            raise ConfigError("position_axis_signs must contain only -1 or 1")
         lo = hi = None
         if "workspace" in entry:
             bounds = mapping(entry["workspace"], {"min", "max"}, set(), "workspace")
@@ -191,6 +201,7 @@ def parse_config(document: Any) -> ReceiverConfig:
             target_pose_topic=out, fk_pose_topic=fk,
             base_frame=text(entry["base_frame"], "base_frame"), tool_frame=text(entry["tool_frame"], "tool_frame"),
             axis_mapping=axes,
+            position_axis_signs=signs,
             position_scale=number(entry.get("position_scale", .8), "position_scale", .001, 10),
             max_displacement=number(entry.get("max_displacement", .8), "max_displacement", .001, 10),
             orientation_enabled=boolean(entry.get("orientation_enabled", True), "orientation_enabled"),
@@ -205,7 +216,10 @@ def parse_config(document: Any) -> ReceiverConfig:
         raise ConfigError("input, output, FK and stop topics must not overlap")
     if buttons_topic in outputs | feedback | {data_topic, stop_topic, "/hc_teleop_recv/status"}:
         raise ConfigError("adapter.buttons_topic must not overlap control or status topics")
-    reserved = outputs | feedback | {data_topic, stop_topic, buttons_topic, '/hc_teleop_recv/status', '/hc_teleop/joint_cmd'}
+    action_topics = {'/hc_teleop_recv/actions', '/hc_teleop_recv/events'}
+    if (outputs | feedback | {data_topic, stop_topic, buttons_topic}) & action_topics:
+        raise ConfigError('teleop action topics must not overlap input, output or buttons topics')
+    reserved = outputs | feedback | {data_topic, stop_topic, buttons_topic, '/hc_teleop_recv/status', '/hc_teleop/joint_cmd'} | action_topics
     feedback_types = {name: 'reserved' for name in reserved}
     feedback_types['/hc_teleop/joint_states'] = 'joint_state'
     validate_peripheral_endpoints(chassis, grippers, reserved, feedback_types)
@@ -218,9 +232,10 @@ def parse_config(document: Any) -> ReceiverConfig:
         enabled_on_start=boolean(ctrl.get("enabled_on_start", False), "enabled_on_start"),
         resume_on_a=boolean(ctrl.get("resume_on_a", True), "resume_on_a"),
         emergency_stop_topic=stop_topic, channels=tuple(channels),
-        robot_id=robot_id, buttons_topic=buttons_topic,
+        robot_id=robot_id, buttons_topic=buttons_topic, actions=actions,
         chassis=chassis, grippers=grippers,
         event_port=event_port,
+        arm_control_enabled=boolean(ctrl.get("arm_control_enabled", True), "control.arm_control_enabled"),
     )
 
 

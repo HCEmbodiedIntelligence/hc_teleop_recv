@@ -160,18 +160,30 @@ def relative_target(
     position_scale: float,
     max_displacement: float,
     orientation_enabled: bool,
+    position_axis_signs: Sequence[float] = (1., 1., 1.),
 ) -> tuple[np.ndarray, np.ndarray]:
     mapping = np.asarray(axis_mapping, dtype=float)
     if mapping.shape != (3, 3) or not np.all(np.isfinite(mapping)):
         raise ValueError("axis_mapping must be finite 3x3")
-    delta = mapping @ (
-        np.asarray(vr_position, dtype=float)
-        - np.asarray(reference_vr_position, dtype=float)
-    ) * float(position_scale)
-    length = float(np.linalg.norm(delta))
+    with np.errstate(over='raise', invalid='raise'):
+        delta = mapping @ (
+            np.asarray(vr_position, dtype=float)
+            - np.asarray(reference_vr_position, dtype=float)
+        ) * float(position_scale)
+    if delta.shape != (3,) or not np.all(np.isfinite(delta)):
+        raise ValueError("VR relative displacement must be a finite 3-vector")
+    signs = np.asarray(position_axis_signs, dtype=float)
+    if signs.shape != (3,) or not np.all(np.isin(signs, (-1., 1.))):
+        raise ValueError("position_axis_signs must contain three -1 or 1 values")
+    delta *= signs
+    # hypot remains finite for large finite world coordinates where squaring
+    # components in a naive norm would overflow.
+    length = math.hypot(*delta)
     if max_displacement > 0.0 and length > max_displacement:
         delta *= max_displacement / length
     target_position = np.asarray(reference_robot_position, dtype=float) + delta
+    if not np.all(np.isfinite(target_position)):
+        raise ValueError("robot target position must be finite")
 
     target_orientation = normalize_quaternion(reference_robot_orientation)
     if orientation_enabled:

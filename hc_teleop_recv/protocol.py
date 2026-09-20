@@ -207,8 +207,10 @@ def validate_packet(packet: PosePacket) -> None:
             raise PacketError("invalid pose dimensions")
         if not all(math.isfinite(v) for v in (*pose.position, *pose.quaternion)):
             raise PacketError("non-finite pose")
-        if any(abs(v) > 5 for v in pose.position):
-            raise PacketError("VR position is outside +/-5 m")
+        # Tracking-space origins are arbitrary. A headset at z=6.9 m does not
+        # request a robot pose at z=6.9 m: the frontend binds measured FK and
+        # uses bounded displacement from the clutch reference. Rejecting the
+        # whole packet here also discarded valid controller buttons/grippers.
         norm = math.sqrt(sum(v * v for v in pose.quaternion))
         if packet.tracked(name) and abs(norm - 1) > .01:
             raise PacketError("tracked pose quaternion must have unit norm")

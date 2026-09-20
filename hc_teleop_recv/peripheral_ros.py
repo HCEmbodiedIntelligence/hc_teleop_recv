@@ -170,11 +170,11 @@ class PeripheralROS:
                 message = Float64(data=float(position))
             self.publishers[cfg.id].publish(message)
 
-    def tick(self, frontend, now):
+    def tick(self, frontend, now, input_ready=True):
         ready = {'chassis':self.base_publisher is not None and self.base_publisher.get_subscription_count()>0}
         ready.update({cfg.id:self.actions[cfg.id].ready() if cfg.id in self.actions else (
             cfg.id in self.publishers and self.publishers[cfg.id].get_subscription_count()>0) for cfg in self.config.grippers})
-        output = self.controller.tick(frontend,now,ready)
+        output = self.controller.tick(frontend,now,ready,input_ready=input_ready)
         if output['chassis'] is not None:
             self.publish_base(output['chassis'])
         for cfg in self.config.grippers:
