@@ -493,12 +493,16 @@ def test_motion_services_rebind_and_action_feedback_with_mock_peer():
     doc['actions'] = {'home_pose_id': 'right_home', 'home_gesture_enabled': True,
                       'recording_buttons_enabled': True}
     recv = TeleopRecvNode(config=parse_config(doc), context=context)
-    peer = Node('fake_action_manager', context=context)
+    peer = Node('fake_action_runtime', context=context)
     executor.add_node(recv); executor.add_node(peer)
     actions = []
     peer.create_subscription(String, '/hc_teleop_recv/actions', lambda m: actions.append(json.loads(m.data)), 10)
     events = peer.create_publisher(String, '/hc_teleop_recv/events', 10)
+    pose_status = peer.create_publisher(String, '/motion/pose_status', 10)
     def pump():
+        pose_status.publish(String(data=json.dumps({
+            'robot_id': 'lab', 'configuration_sha256': recv.configuration_identity['sha256'],
+            'home_pose_id': 'right_home', 'ready': True, 'state': 'idle', 'stamp_ns': time.time_ns()})))
         end = time.monotonic() + .06
         while time.monotonic() < end:
             executor.spin_once(timeout_sec=.002)

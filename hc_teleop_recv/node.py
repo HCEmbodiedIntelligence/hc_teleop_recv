@@ -49,6 +49,8 @@ class TeleopRecvNode(Node):
         self.input_actions = InputActions(self.config.actions or ActionConfig())
         self.last_action = None
         self.last_action_request = {}
+        self.pose_runtime_at = float('-inf')
+        self.pose_runtime_ready = False
         self.peripherals = PeripheralROS(self, self.config)
         self.session = InputSession(self.config.input_timeout)
         self.received_packets = 0
@@ -89,6 +91,8 @@ class TeleopRecvNode(Node):
         self.home_service = self.create_service(Trigger, '~/home', self._home)
         self.action_publisher = self.create_publisher(String, '~/actions', 10)
         self.event_subscription = self.create_subscription(String, '~/events', self._action_event, 10)
+        self.pose_runtime_subscription = self.create_subscription(
+            String, '/motion/pose_status', self._pose_runtime_status, 10)
         self.stop_publisher = self.create_publisher(
             Bool, self.config.emergency_stop_topic, 10)
         self.stop_subscription = self.create_subscription(
@@ -234,7 +238,7 @@ class TeleopRecvNode(Node):
 
     def _home(self, request, response):
         response.success = self._request_action('home')
-        response.message = '已提交回位请求，结果见遥操状态' if response.success else '未提交：检查回位姿态、管理器连接或当前动作'
+        response.message = '已提交回位请求，结果见遥操状态' if response.success else '未提交：检查回位姿态、动作运行时或当前动作'
         return response
 
     def _request_action(self, action):
@@ -243,8 +247,11 @@ class TeleopRecvNode(Node):
             return False
         if action == 'home' and (self.frontend.inhibited or not self.input_actions.config.home_pose_id):
             return False
+        if action == 'home' and (now - self.pose_runtime_at >= 1.0 or not self.pose_runtime_ready):
+            self._send_vr_event('teleop_action_error', '姿态运行时未就绪或配置不一致，未提交回位')
+            return False
         if not self.action_publisher.get_subscription_count():
-            self._send_vr_event('teleop_action_error', '管理器未连接，操作未执行')
+            self._send_vr_event('teleop_action_error', '动作运行时或录制服务未连接，操作未执行')
             return False
         self.last_action_request[action] = now
         payload = {'id': uuid.uuid4().hex, 'action': action, 'robot_id': self.config.robot_id,
@@ -253,6 +260,20 @@ class TeleopRecvNode(Node):
             payload['pose_id'] = self.input_actions.config.home_pose_id
         self.action_publisher.publish(String(data=json.dumps(payload)))
         return True
+
+    def _pose_runtime_status(self, message):
+        if len(message.data) > 8192:
+            return
+        try:
+            status = json.loads(message.data)
+            if (status['robot_id'] == self.config.robot_id and
+                    status['configuration_sha256'] == self.configuration_identity['sha256'] and
+                    status['home_pose_id'] == self.input_actions.config.home_pose_id and
+                    0 <= time.time_ns() - status['stamp_ns'] < 1_000_000_000):
+                self.pose_runtime_at = time.monotonic()
+                self.pose_runtime_ready = bool(status['ready'] and status['state'] == 'idle')
+        except (ValueError, KeyError, TypeError):
+            pass
 
     def _action_event(self, message):
         if len(message.data) > 8192:
