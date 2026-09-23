@@ -1,10 +1,12 @@
 """ROS interface adapters for optional chassis and grippers."""
 import math
+import json
 import time
+import uuid
 
 from geometry_msgs.msg import Twist, TwistStamped
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, String
 from rclpy.qos import qos_profile_sensor_data
 
 from .peripherals import Peripherals
@@ -101,6 +103,7 @@ class PeripheralROS:
         self.controller = Peripherals(config)
         self.base_publisher = None
         self.publishers, self.actions, self.errors = {}, {}, {}
+        self.capture_publishers, self.capture_sequences, self.capture_epochs = {}, {}, {}
         self.subscriptions, self.feedback_stamps = [], {}
         if config.chassis and config.chassis.enabled:
             kind = Twist if config.chassis.message_type == 'twist' else TwistStamped
@@ -116,6 +119,11 @@ class PeripheralROS:
             else:
                 kind = JointState if cfg.command_type == 'joint_state' else Float64
                 self.publishers[cfg.id] = node.create_publisher(kind,cfg.command_topic,10)
+                if cfg.command_type == 'joint_state' and cfg.command_topic not in self.capture_publishers:
+                    self.capture_publishers[cfg.command_topic] = node.create_publisher(
+                        String,cfg.command_topic+'/capture_evidence',10)
+                    self.capture_sequences[cfg.command_topic] = 0
+                    self.capture_epochs[cfg.command_topic] = uuid.uuid4().hex
             kind = JointState if cfg.feedback_type == 'joint_state' else Float64
             self.subscriptions.append(node.create_subscription(kind,cfg.feedback_topic,
                 lambda message,cfg=cfg:self.feedback(cfg,message),qos_profile_sensor_data))
@@ -138,6 +146,9 @@ class PeripheralROS:
         self.controller.feedback(cfg.id,position,time.monotonic())
 
     def reset(self):
+        for cfg in self.config.grippers:
+            if self.controller.grippers[cfg.id].state == 'active':
+                self._capture_event(cfg,'rebind')
         self.controller.reset()
         for action in self.actions.values():
             action.stop()
@@ -156,7 +167,25 @@ class PeripheralROS:
             message = twist
         self.base_publisher.publish(message)
 
-    def publish_gripper(self, cfg, position):
+    def _capture_emit(self,cfg,kind,stamp,names,**data):
+        publisher=self.capture_publishers.get(cfg.command_topic)
+        if publisher is None:
+            return
+        self.capture_sequences[cfg.command_topic]+=1
+        payload={'schema':'openarm-action-evidence/v1','kind':kind,
+                 'sequence':self.capture_sequences[cfg.command_topic],
+                 'source_epoch':self.capture_epochs[cfg.command_topic],
+                 'stamp_ns':stamp,'names':names,**data}
+        publisher.publish(String(data=json.dumps(payload,separators=(',',':'))))
+
+    def _capture_event(self,cfg,reason):
+        if cfg.command_topic not in self.capture_publishers:
+            return
+        self.capture_epochs[cfg.command_topic]=uuid.uuid4().hex
+        self._capture_emit(cfg,'event',self.node.get_clock().now().nanoseconds,
+                           [cfg.joint_name],reason=reason)
+
+    def publish_gripper(self, cfg, position, *, capture_valid=True):
         if cfg.id in self.actions:
             self.actions[cfg.id].command(position)
         elif cfg.id in self.publishers:
@@ -169,6 +198,10 @@ class PeripheralROS:
             else:
                 message = Float64(data=float(position))
             self.publishers[cfg.id].publish(message)
+            if capture_valid and cfg.command_type == 'joint_state':
+                stamp=message.header.stamp.sec*10**9+message.header.stamp.nanosec
+                self._capture_emit(cfg,'command',stamp,message.name,
+                                   positions=list(message.position))
 
     def tick(self, frontend, now, input_ready=True):
         ready = {'chassis':self.base_publisher is not None and self.base_publisher.get_subscription_count()>0}
@@ -179,12 +212,16 @@ class PeripheralROS:
             self.publish_base(output['chassis'])
         for cfg in self.config.grippers:
             if cfg.id in output['stop_grippers']:
+                state = self.controller.grippers[cfg.id]
+                reason = ('pause' if not frontend.enabled else
+                          'clutch_release' if state.reason == '使能按键已松开' else
+                          'input_loss')
+                self._capture_event(cfg,reason)
                 if cfg.id in self.actions:
                     self.actions[cfg.id].stop()
                 else:
-                    state = self.controller.grippers[cfg.id]
                     if state.feedback is not None and now-state.feedback_at <= cfg.feedback_timeout:
-                        self.publish_gripper(cfg,state.feedback)
+                        self.publish_gripper(cfg,state.feedback,capture_valid=False)
             elif cfg.id in output['grippers']:
                 self.publish_gripper(cfg,output['grippers'][cfg.id])
 
